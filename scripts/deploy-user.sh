@@ -14,11 +14,18 @@ set -e
 : "${LOCAL_PORT:?LOCAL_PORT required (e.g. 8359) — must match the ingress service port configured in Cloudflare}"
 : "${UPSTREAM:?UPSTREAM required (e.g. api-sgp-oc.xiaomimimo.com:443)}"
 
+# PROXY_API_KEY: if set, Caddy rejects requests without "Authorization: Bearer <PROXY_API_KEY>".
+# Strongly recommended for public endpoints — without it, anyone who finds your
+# tunnel URL can use your upstream for free. If unset, the proxy is open.
+if [ -z "$PROXY_API_KEY" ]; then
+  echo "WARNING: PROXY_API_KEY unset — public endpoint is OPEN (no client auth)."
+fi
+
 # ── Optional env with defaults ──
 DASHBOARD_PORT="${DASHBOARD_PORT:-62852}"
 EXTRA_PORT="${EXTRA_PORT:-7860}"
 CADDY_VERSION="${CADDY_VERSION:-2.11.3}"
-# API_KEY_ENV: if set, inject {env.$API_KEY_ENV} as Authorization + x-api-key. If unset, plain proxy.
+# API_KEY_ENV: if set, inject {env.$API_KEY_ENV} as Authorization + x-api-key upstream. If unset, plain proxy.
 UPSTREAM_HOST="${UPSTREAM%%:*}"
 UPSTREAM_PORT="${UPSTREAM##*:}"
 UPSTREAM_TLS="${UPSTREAM_TLS:-$([ "$UPSTREAM_PORT" = "443" ] && echo true || echo false)}"
@@ -68,9 +75,17 @@ if [ -n "$API_KEY_ENV" ]; then
   API_KEY_LINE=$'        header_up Authorization "Bearer {env.'"${API_KEY_ENV}"'}"\n        header_up x-api-key {env.'"${API_KEY_ENV}"'}'
 fi
 
+# AUTH_BLOCK: if PROXY_API_KEY set, reject clients without that bearer token.
+# {env.PROXY_API_KEY} is a Caddy placeholder — Caddy reads it from its process
+# env at config load. The Caddyfile on disk contains no secret.
+AUTH_BLOCK=""
+if [ -n "$PROXY_API_KEY" ]; then
+  AUTH_BLOCK=$'    @unauth {\n        not header Authorization "Bearer {env.PROXY_API_KEY}"\n    }\n    respond @unauth 401\n'
+fi
+
 cat > "$CONFIG_DIR/Caddyfile" << EOF
 :${LOCAL_PORT}, :${DASHBOARD_PORT}, :${EXTRA_PORT} {
-    reverse_proxy ${UPSTREAM} {
+${AUTH_BLOCK}    reverse_proxy ${UPSTREAM} {
         header_up Host ${UPSTREAM_HOST}
 ${API_KEY_LINE}
 ${TLS_LINE}
@@ -92,11 +107,23 @@ echo "==> Verification:"
 echo -n "  cloudflared: "; pgrep -f "cloudflared tunnel" > /dev/null && echo "running (PID $(pgrep -f 'cloudflared tunnel' | head -1))" || echo "NOT running"
 echo -n "  caddy: "; pgrep caddy > /dev/null && echo "running (PID $(pgrep caddy | head -1))" || echo "NOT running"
 echo -n "  port ${LOCAL_PORT}: "; ss -tlnp 2>/dev/null | grep ":${LOCAL_PORT}" > /dev/null && echo "listening" || echo "checking..."
-echo -n "  local test: "; curl -s -o /dev/null -w "%{http_code}" "http://localhost:${LOCAL_PORT}/" 2>/dev/null; echo ""
-echo -n "  public test: "; curl -s -o /dev/null -w "%{http_code}" "https://${PUBLIC_HOSTNAME}/" 2>/dev/null; echo ""
+if [ -n "$PROXY_API_KEY" ]; then
+  echo -n "  local (no key, expect 401): "; curl -s -o /dev/null -w "%{http_code}" "http://localhost:${LOCAL_PORT}/" 2>/dev/null; echo ""
+  echo -n "  local (with key, expect 200): "; curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $PROXY_API_KEY" "http://localhost:${LOCAL_PORT}/" 2>/dev/null; echo ""
+  echo -n "  public (no key, expect 401): "; curl -s -o /dev/null -w "%{http_code}" "https://${PUBLIC_HOSTNAME}/" 2>/dev/null; echo ""
+  echo -n "  public (with key, expect 200): "; curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $PROXY_API_KEY" "https://${PUBLIC_HOSTNAME}/" 2>/dev/null; echo ""
+else
+  echo -n "  local test: "; curl -s -o /dev/null -w "%{http_code}" "http://localhost:${LOCAL_PORT}/" 2>/dev/null; echo ""
+  echo -n "  public test: "; curl -s -o /dev/null -w "%{http_code}" "https://${PUBLIC_HOSTNAME}/" 2>/dev/null; echo ""
+fi
 echo ""
 echo "==> Done! Public endpoint: https://${PUBLIC_HOSTNAME}"
-echo "   Client needs no API key — Caddy injects it" ${API_KEY_ENV:+"(via env \$$API_KEY_ENV)"}
+if [ -n "$PROXY_API_KEY" ]; then
+  echo "   Client auth: REQUIRED (Authorization: Bearer \$PROXY_API_KEY)"
+else
+  echo "   Client auth: NONE (open proxy — set PROXY_API_KEY to enable)"
+fi
+echo "   Upstream auth:" ${API_KEY_ENV:+"injected via env \$$API_KEY_ENV"}${API_KEY_ENV:-" none"}
 echo ""
 echo "==> Stop: pkill cloudflared; pkill caddy"
 echo "==> Logs: $LOG_DIR/"

@@ -9,6 +9,12 @@ set -e
 : "${LOCAL_PORT:?LOCAL_PORT required — must match ingress service port in Cloudflare}"
 : "${UPSTREAM:?UPSTREAM required (e.g. api-sgp-oc.xiaomimimo.com:443)}"
 
+# PROXY_API_KEY: if set, Caddy rejects requests without "Authorization: Bearer <PROXY_API_KEY>".
+# Strongly recommended for public endpoints. If unset, the proxy is open.
+if [ -z "$PROXY_API_KEY" ]; then
+  echo "WARNING: PROXY_API_KEY unset — public endpoint is OPEN (no client auth)."
+fi
+
 DASHBOARD_PORT="${DASHBOARD_PORT:-62852}"
 EXTRA_PORT="${EXTRA_PORT:-7860}"
 CADDY_VERSION="${CADDY_VERSION:-2.11.3}"
@@ -55,9 +61,15 @@ API_KEY_LINE=""
 if [ -n "$API_KEY_ENV" ]; then
   API_KEY_LINE=$'        header_up Authorization "Bearer {env.'"${API_KEY_ENV}"'}"\n        header_up x-api-key {env.'"${API_KEY_ENV}"'}'
 fi
+
+AUTH_BLOCK=""
+if [ -n "$PROXY_API_KEY" ]; then
+  AUTH_BLOCK=$'    @unauth {\n        not header Authorization "Bearer {env.PROXY_API_KEY}"\n    }\n    respond @unauth 401\n'
+fi
+
 cat > /etc/caddy/Caddyfile << EOF
 :${LOCAL_PORT}, :${DASHBOARD_PORT}, :${EXTRA_PORT} {
-    reverse_proxy ${UPSTREAM} {
+${AUTH_BLOCK}    reverse_proxy ${UPSTREAM} {
         header_up Host ${UPSTREAM_HOST}
 ${API_KEY_LINE}
 ${TLS_LINE}
@@ -66,7 +78,7 @@ ${TLS_LINE}
 EOF
 caddy fmt --overwrite /etc/caddy/Caddyfile
 
-# 5. Start Caddy
+# 5. Start Caddy (nohup inherits PROXY_API_KEY from env for {env.PROXY_API_KEY} substitution)
 echo "==> Starting Caddy..."
 pkill caddy 2>/dev/null || true
 sleep 1
@@ -81,3 +93,8 @@ echo -n "  port ${LOCAL_PORT}: "; ss -tlnp | grep ":${LOCAL_PORT}" > /dev/null &
 echo -n "  local test: "; curl -s -o /dev/null -w "%{http_code}" "http://localhost:${LOCAL_PORT}/"; echo ""
 echo ""
 echo "==> Done! Public endpoint: https://${PUBLIC_HOSTNAME}"
+if [ -n "$PROXY_API_KEY" ]; then
+  echo "   Client auth: REQUIRED (Authorization: Bearer \$PROXY_API_KEY)"
+else
+  echo "   Client auth: NONE (open proxy)"
+fi
