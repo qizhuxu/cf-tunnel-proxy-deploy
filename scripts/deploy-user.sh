@@ -78,26 +78,26 @@ echo "  caddy: $($INSTALL_DIR/caddy version 2>&1)"
 
 # ── 4. Build Caddyfile ──
 echo "==> Configuring Caddy..."
-TLS_BLOCK=""
+TLS_LINE=""
 if [ "$UPSTREAM_TLS" = "true" ]; then
-  TLS_BLOCK=$'\t\t\ttransport http {\n\t\t\t\ttls\n\t\t\t\tread_timeout 120s\n\t\t\t}'
+  TLS_LINE=$'        transport http {\n            tls\n            read_timeout 120s\n        }'
 fi
-API_KEY_BLOCK=""
+API_KEY_LINE=""
 if [ -n "$API_KEY_ENV" ]; then
   if [ -z "${!API_KEY_ENV}" ]; then
     echo "ERROR: API_KEY_ENV='$API_KEY_ENV' but env var \$$API_KEY_ENV is not set"
     exit 1
   fi
-  API_KEY_BLOCK=$'\t\theader_up Authorization "Bearer {env.'${API_KEY_ENV}'}"\n\t\theader_up x-api-key {env.'${API_KEY_ENV}'}'
+  API_KEY_LINE=$'        header_up Authorization "Bearer {env.'"${API_KEY_ENV}"'}"\n        header_up x-api-key {env.'"${API_KEY_ENV}"'}'
 fi
 
 cat > "$CONFIG_DIR/Caddyfile" << EOF
 :${LOCAL_PORT}, :${DASHBOARD_PORT}, :${EXTRA_PORT} {
-\treverse_proxy ${UPSTREAM} {
-\t\theader_up Host ${UPSTREAM_HOST}
-${API_KEY_BLOCK}
-${TLS_BLOCK}
-\t}
+    reverse_proxy ${UPSTREAM} {
+        header_up Host ${UPSTREAM_HOST}
+${API_KEY_LINE}
+${TLS_LINE}
+    }
 }
 EOF
 "$INSTALL_DIR/caddy" fmt --overwrite "$CONFIG_DIR/Caddyfile"
