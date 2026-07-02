@@ -2,11 +2,12 @@
 set -e
 
 # ── Cloudflare Tunnel + Caddy reverse proxy (generic, root/systemd) ──
+# Uses --token (remotely-managed). Ingress must be configured in Cloudflare.
 
 : "${TUNNEL_TOKEN:?TUNNEL_TOKEN required (the eyJ... string)}"
-: "${PUBLIC_HOSTNAME:?PUBLIC_HOSTNAME required}"
-: "${LOCAL_PORT:?LOCAL_PORT required}"
-: "${UPSTREAM:?UPSTREAM required}"
+: "${PUBLIC_HOSTNAME:?PUBLIC_HOSTNAME required — must be mapped to this tunnel in Cloudflare}"
+: "${LOCAL_PORT:?LOCAL_PORT required — must match ingress service port in Cloudflare}"
+: "${UPSTREAM:?UPSTREAM required (e.g. api-sgp-oc.xiaomimimo.com:443)}"
 
 DASHBOARD_PORT="${DASHBOARD_PORT:-62852}"
 EXTRA_PORT="${EXTRA_PORT:-7860}"
@@ -15,38 +16,27 @@ UPSTREAM_HOST="${UPSTREAM%%:*}"
 UPSTREAM_PORT="${UPSTREAM##*:}"
 UPSTREAM_TLS="${UPSTREAM_TLS:-$([ "$UPSTREAM_PORT" = "443" ] && echo true || echo false)}"
 
-# Decode token
-TOKEN_JSON=$(python3 -c "
-import base64, json, sys
-t = sys.argv[1]
-d = json.loads(base64.urlsafe_b64decode(t + '=' * (-len(t) % 4)))
-print(json.dumps({'AccountTag': d['a'], 'TunnelID': d['t'], 'TunnelSecret': d['s']}))
-" "$TUNNEL_TOKEN")
-ACCOUNT_TAG=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['AccountTag'])" "$TOKEN_JSON")
-TUNNEL_ID=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['TunnelID'])" "$TOKEN_JSON")
-TUNNEL_SECRET=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['TunnelSecret'])" "$TOKEN_JSON")
-
 # 1. cloudflared
 echo "==> Installing cloudflared..."
 curl -sL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -o /usr/local/bin/cloudflared
 chmod +x /usr/local/bin/cloudflared
 
-# 2. tunnel config
-echo "==> Configuring tunnel..."
-mkdir -p /etc/cloudflared
-cat > /etc/cloudflared/${TUNNEL_ID}.json << EOF
-{"AccountTag":"${ACCOUNT_TAG}","TunnelSecret":"${TUNNEL_SECRET}","TunnelID":"${TUNNEL_ID}"}
+# 2. tunnel service (--token, remotely-managed)
+echo "==> Installing cloudflared service (--token)..."
+echo "  NOTE: ingress '${PUBLIC_HOSTNAME} → http://localhost:${LOCAL_PORT}' must be in Cloudflare."
+# systemd service with the token; cloudflared reads TUNNEL_TOKEN env
+cat > /etc/systemd/system/cloudflared.service << EOF
+[Unit]
+Description=Cloudflare Tunnel (cf-tunnel-proxy-deploy)
+After=network-online.target
+[Service]
+Environment="TUNNEL_TOKEN=${TUNNEL_TOKEN}"
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --token \$TUNNEL_TOKEN
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
 EOF
-cat > /etc/cloudflared/config.yml << EOF
-tunnel: ${TUNNEL_ID}
-credentials-file: /etc/cloudflared/${TUNNEL_ID}.json
-ingress:
-  - hostname: ${PUBLIC_HOSTNAME}
-    service: http://localhost:${LOCAL_PORT}
-  - service: http_status:404
-EOF
-cloudflared tunnel ingress validate
-cloudflared service install
+systemctl daemon-reload
 systemctl enable --now cloudflared
 
 # 3. Caddy
@@ -76,13 +66,12 @@ ${TLS_LINE}
 EOF
 caddy fmt --overwrite /etc/caddy/Caddyfile
 
-# 5. Start
+# 5. Start Caddy
 echo "==> Starting Caddy..."
 pkill caddy 2>/dev/null || true
 sleep 1
 nohup caddy run --config /etc/caddy/Caddyfile > /tmp/caddy.log 2>&1 & disown
 sleep 2
-rm -f /root/.cloudflared/config.yml
 
 echo ""
 echo "==> Verification:"
