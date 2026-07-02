@@ -123,7 +123,11 @@ if [ -n "$PROXY_API_KEY" ]; then
 else
   echo "   Client auth: NONE (open proxy — set PROXY_API_KEY to enable)"
 fi
-echo "   Upstream auth:" ${API_KEY_ENV:+"injected via env \$$API_KEY_ENV"}${API_KEY_ENV:-" none"}
+if [ -n "$API_KEY_ENV" ]; then
+  echo "   Upstream auth: injected via env \$$API_KEY_ENV"
+else
+  echo "   Upstream auth: none (plain proxy to upstream)"
+fi
 echo ""
 echo "==> Stop: pkill cloudflared; pkill caddy"
 echo "==> Logs: $LOG_DIR/"
