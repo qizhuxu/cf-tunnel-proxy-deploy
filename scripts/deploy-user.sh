@@ -72,7 +72,7 @@ if [ -n "$API_KEY_ENV" ]; then
     echo "ERROR: API_KEY_ENV='$API_KEY_ENV' but env var \$$API_KEY_ENV is not set"
     exit 1
   fi
-  API_KEY_LINE=$'        header_up Authorization "Bearer {env.'"${API_KEY_ENV}"'}"\n        header_up x-api-key {env.'"${API_KEY_ENV}"'}'
+  API_KEY_LINE="        header_up Authorization \"Bearer {env.${API_KEY_ENV}}\""$'\n'"        header_up x-api-key {env.${API_KEY_ENV}}"
 fi
 
 # AUTH_BLOCK: if PROXY_API_KEY set, reject clients without that bearer token.

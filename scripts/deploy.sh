@@ -59,7 +59,7 @@ if [ "$UPSTREAM_TLS" = "true" ]; then
 fi
 API_KEY_LINE=""
 if [ -n "$API_KEY_ENV" ]; then
-  API_KEY_LINE=$'        header_up Authorization "Bearer {env.'"${API_KEY_ENV}"'}"\n        header_up x-api-key {env.'"${API_KEY_ENV}"'}'
+  API_KEY_LINE="        header_up Authorization \"Bearer {env.${API_KEY_ENV}}\""$'\n'"        header_up x-api-key {env.${API_KEY_ENV}}"
 fi
 
 AUTH_BLOCK=""
