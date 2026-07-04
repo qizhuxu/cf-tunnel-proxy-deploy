@@ -38,14 +38,63 @@ class _DropValue:
 DROP = _DropValue()
 
 
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text") if item.get("type") == "text" else item.get("content")
+                if text is not None:
+                    parts.append(str(text))
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _message_label(role: str) -> str:
+    if role == "system":
+        return "System instruction"
+    if role == "assistant":
+        return "Assistant message"
+    return "User message"
+
+
+def _fold_messages_for_mimo(messages: Any) -> Any:
+    if not isinstance(messages, list):
+        return messages
+    if len(messages) == 1 and isinstance(messages[0], dict) and messages[0].get("role") == "user":
+        return messages
+
+    parts = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = _content_to_text(message.get("content"))
+        if not content:
+            continue
+        role = str(message.get("role") or "user")
+        parts.append(f"{_message_label(role)}:\n{content}")
+
+    if not parts:
+        return []
+    return [{"role": "user", "content": "\n\n".join(parts)}]
+
+
 def normalize_json_for_mimo(value: Any, *, field_name: str | None = None) -> Any:
-    """Remove client-side undefined sentinels while preserving prompt content."""
+    """Remove client-side undefined sentinels and adapt chat messages for MiMo."""
     if isinstance(value, dict):
         normalized: dict[str, Any] = {}
         for key, child in value.items():
             child_value = normalize_json_for_mimo(child, field_name=str(key))
             if child_value is not DROP:
                 normalized[key] = child_value
+        if isinstance(normalized.get("messages"), list):
+            normalized["messages"] = _fold_messages_for_mimo(normalized["messages"])
         return normalized
 
     if isinstance(value, list):

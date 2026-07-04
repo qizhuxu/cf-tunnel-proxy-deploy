@@ -30,7 +30,7 @@ class NormalizeJsonForMimoTests(unittest.TestCase):
         self.assertNotIn("max_tokens", normalized)
         self.assertNotIn("tools", normalized)
 
-    def test_removes_undefined_sentinels_without_rewriting_message_content(self):
+    def test_removes_undefined_sentinels_without_dropping_message_content(self):
         payload = {
             "model": "mimo-v2.5",
             "messages": [
@@ -48,8 +48,7 @@ class NormalizeJsonForMimoTests(unittest.TestCase):
             {
                 "model": "mimo-v2.5",
                 "messages": [
-                    {"role": "system", "content": "test"},
-                    {"role": "user", "content": "[undefined]"},
+                    {"role": "user", "content": "System instruction:\ntest\n\nUser message:\n[undefined]"},
                 ],
                 "metadata": {"keep": "yes"},
             },
@@ -76,6 +75,56 @@ class NormalizeJsonForMimoTests(unittest.TestCase):
                 "model": "mimo-v2.5",
                 "messages": [
                     {"role": "user", "content": [{"type": "text", "text": "[undefined]"}]},
+                ],
+            },
+        )
+
+    def test_folds_cherry_studio_system_user_request_into_single_user_message(self):
+        payload = {
+            "model": "mimo-v2.5",
+            "user": "[undefined]",
+            "max_tokens": "[undefined]",
+            "messages": [
+                {"role": "system", "content": "test"},
+                {"role": "user", "content": "hi"},
+            ],
+            "tools": "[undefined]",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+
+        normalized = normalize_json_for_mimo(payload)
+
+        self.assertEqual(
+            normalized,
+            {
+                "model": "mimo-v2.5",
+                "messages": [
+                    {"role": "user", "content": "System instruction:\ntest\n\nUser message:\nhi"},
+                ],
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+        )
+
+    def test_folds_multi_turn_history_into_single_user_message(self):
+        payload = {
+            "model": "mimo-v2.5",
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "second"},
+                {"role": "user", "content": "third"},
+            ],
+        }
+
+        normalized = normalize_json_for_mimo(payload)
+
+        self.assertEqual(
+            normalized,
+            {
+                "model": "mimo-v2.5",
+                "messages": [
+                    {"role": "user", "content": "User message:\nfirst\n\nAssistant message:\nsecond\n\nUser message:\nthird"},
                 ],
             },
         )
