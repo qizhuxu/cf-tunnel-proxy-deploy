@@ -24,16 +24,24 @@ fi
 # ── Optional env with defaults ──
 DASHBOARD_PORT="${DASHBOARD_PORT:-62852}"
 EXTRA_PORT="${EXTRA_PORT:-7860}"
+SHIM_PORT="${SHIM_PORT:-$((LOCAL_PORT + 1))}"
 CADDY_VERSION="${CADDY_VERSION:-2.11.3}"
 # API_KEY_ENV: if set, inject {env.$API_KEY_ENV} as Authorization + x-api-key upstream. If unset, plain proxy.
 UPSTREAM_HOST="${UPSTREAM%%:*}"
 UPSTREAM_PORT="${UPSTREAM##*:}"
 UPSTREAM_TLS="${UPSTREAM_TLS:-$([ "$UPSTREAM_PORT" = "443" ] && echo true || echo false)}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$HOME/.local/bin"
 CONFIG_DIR="$HOME/.config/cf-tunnel-proxy"
 LOG_DIR="$HOME/.local/log/cf-tunnel-proxy"
 mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$LOG_DIR"
+
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)}"
+if [ -z "$PYTHON_BIN" ]; then
+  echo "ERROR: python3/python required for OpenAI compatibility shim"
+  exit 1
+fi
 
 # ── 1. Install cloudflared ──
 echo "==> Installing cloudflared..."
@@ -62,10 +70,6 @@ echo "  caddy: $($INSTALL_DIR/caddy version 2>&1)"
 
 # ── 4. Build Caddyfile ──
 echo "==> Configuring Caddy..."
-TLS_LINE=""
-if [ "$UPSTREAM_TLS" = "true" ]; then
-  TLS_LINE=$'        transport http {\n            tls\n            read_timeout 120s\n        }'
-fi
 API_KEY_LINE=""
 if [ -n "$API_KEY_ENV" ]; then
   if [ -z "${!API_KEY_ENV}" ]; then
@@ -85,26 +89,36 @@ fi
 
 cat > "$CONFIG_DIR/Caddyfile" << EOF
 :${LOCAL_PORT}, :${DASHBOARD_PORT}, :${EXTRA_PORT} {
-${AUTH_BLOCK}    reverse_proxy ${UPSTREAM} {
+${AUTH_BLOCK}    reverse_proxy 127.0.0.1:${SHIM_PORT} {
         header_up Host ${UPSTREAM_HOST}
 ${API_KEY_LINE}
-${TLS_LINE}
     }
 }
 EOF
 "$INSTALL_DIR/caddy" fmt --overwrite "$CONFIG_DIR/Caddyfile"
 
-# ── 5. Start Caddy ──
+# ── 5. Start OpenAI compatibility shim ──
+echo "==> Starting OpenAI compatibility shim..."
+pkill -f "openai_compat_proxy.py" 2>/dev/null || true
+sleep 1
+nohup env UPSTREAM="$UPSTREAM" UPSTREAM_TLS="$UPSTREAM_TLS" SHIM_PORT="$SHIM_PORT" \
+  "$PYTHON_BIN" "$SCRIPT_DIR/openai_compat_proxy.py" --host 127.0.0.1 --port "$SHIM_PORT" \
+  > "$LOG_DIR/openai_compat_proxy.log" 2>&1 & disown
+sleep 1
+echo "  shim PID: $(pgrep -f 'openai_compat_proxy.py' | head -1)"
+
+# ── 6. Start Caddy ──
 echo "==> Starting Caddy..."
 pkill caddy 2>/dev/null || true
 sleep 1
 nohup "$INSTALL_DIR/caddy" run --config "$CONFIG_DIR/Caddyfile" > "$LOG_DIR/caddy.log" 2>&1 & disown
 sleep 2
 
-# ── 6. Verify ──
+# ── 7. Verify ──
 echo ""
 echo "==> Verification:"
 echo -n "  cloudflared: "; pgrep -f "cloudflared tunnel" > /dev/null && echo "running (PID $(pgrep -f 'cloudflared tunnel' | head -1))" || echo "NOT running"
+echo -n "  shim: "; pgrep -f "openai_compat_proxy.py" > /dev/null && echo "running (PID $(pgrep -f 'openai_compat_proxy.py' | head -1))" || echo "NOT running"
 echo -n "  caddy: "; pgrep caddy > /dev/null && echo "running (PID $(pgrep caddy | head -1))" || echo "NOT running"
 echo -n "  port ${LOCAL_PORT}: "; ss -tlnp 2>/dev/null | grep ":${LOCAL_PORT}" > /dev/null && echo "listening" || echo "checking..."
 if [ -n "$PROXY_API_KEY" ]; then
@@ -129,5 +143,5 @@ else
   echo "   Upstream auth: none (plain proxy to upstream)"
 fi
 echo ""
-echo "==> Stop: pkill cloudflared; pkill caddy"
+echo "==> Stop: pkill cloudflared; pkill caddy; pkill -f openai_compat_proxy.py"
 echo "==> Logs: $LOG_DIR/"

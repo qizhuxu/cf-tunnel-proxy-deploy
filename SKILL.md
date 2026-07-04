@@ -5,18 +5,20 @@ description: Deploy a generic Cloudflare Tunnel + Caddy reverse proxy. Use when 
 
 # Cloudflare Tunnel + Caddy Reverse Proxy (generic)
 
-Deploy a reverse proxy behind a Cloudflare Tunnel. Unlike `mimo-proxy-deploy` (which hardcodes MiMo credentials), this skill is **generic**: the user provides the tunnel token, public hostname, and listening port; the upstream, upstream API-key env var, and client-side auth key are also configurable.
+Deploy a reverse proxy behind a Cloudflare Tunnel. Unlike `mimo-proxy-deploy` (which hardcodes MiMo credentials), this skill is **generic**: the user provides the tunnel token, public hostname, and listening port; the upstream, upstream API-key env var, and client-side auth key are also configurable. It also runs a local OpenAI compatibility shim that removes `"[undefined]"` optional-parameter sentinels before MiMo chat-completions requests reach upstream.
 
 ## Architecture
 
 ```
-Client (Authorization: Bearer <PROXY_API_KEY>) → Cloudflare Tunnel → Caddy (:LOCAL_PORT) → UPSTREAM
+Client (Authorization: Bearer <PROXY_API_KEY>) → Cloudflare Tunnel → Caddy (:LOCAL_PORT) → OpenAI compatibility shim (:SHIM_PORT) → UPSTREAM
 ```
 
 - `cloudflared` connects to Cloudflare Edge via `cloudflared tunnel run --token "$TUNNEL_TOKEN"` (**remotely-managed**). The skill does NOT decode the token or write a local `config.yml` — ingress (`PUBLIC_HOSTNAME → http://localhost:LOCAL_PORT`) must be pre-configured in the Cloudflare dashboard for this tunnel.
-- `Caddy` listens on `LOCAL_PORT` (plus `DASHBOARD_PORT`/`EXTRA_PORT` to survive Cloudflare Dashboard port overrides) and reverse-proxies to `UPSTREAM`. Two independent auth concerns:
+- `Caddy` listens on `LOCAL_PORT` (plus `DASHBOARD_PORT`/`EXTRA_PORT` to survive Cloudflare Dashboard port overrides), enforces client auth, injects upstream API-key headers, then reverse-proxies to the local shim.
+- `OpenAI compatibility shim` listens on `SHIM_PORT` and forwards to `UPSTREAM`. For `POST /v1/chat/completions` JSON bodies, it removes `"[undefined]"` sentinels that some OpenAI-compatible clients serialize for unset optional parameters. It preserves valid falsey values (`false`, `0`) and message `content` text.
+- Two independent auth concerns:
   - **Client auth** (`PROXY_API_KEY`, optional): if set, Caddy rejects requests without `Authorization: Bearer <PROXY_API_KEY>` (401). Strongly recommended for public endpoints.
-  - **Upstream auth** (`API_KEY_ENV`, optional): if set, Caddy injects `Authorization: Bearer {env.$API_KEY_ENV}` + `x-api-key` on every upstream request, so end clients need zero upstream credentials.
+  - **Upstream auth** (`API_KEY_ENV`, optional): if set, Caddy injects `Authorization: Bearer {env.$API_KEY_ENV}` + `x-api-key` before the shim forwards upstream, so end clients need zero upstream credentials.
 
 ## Required environment variables
 
@@ -35,6 +37,8 @@ Client (Authorization: Bearer <PROXY_API_KEY>) → Cloudflare Tunnel → Caddy (
 | `API_KEY_ENV` | _(unset)_ | Env var name holding the upstream API key to inject as `Authorization` + `x-api-key`. If unset, no upstream auth injection. Example: `MIMO_API_KEY`. |
 | `DASHBOARD_PORT` | `62852` | Extra Caddy listen port (Cloudflare Dashboard may push traffic here). |
 | `EXTRA_PORT` | `7860` | Another extra listen port. |
+| `SHIM_PORT` | `LOCAL_PORT + 1` | Local-only Python shim port. Caddy forwards to this port. |
+| `PYTHON_BIN` | auto-detect | Python executable for the compatibility shim. |
 | `CADDY_VERSION` | `2.11.3` | Caddy release version. |
 | `UPSTREAM_TLS` | auto (`true` if UPSTREAM port is 443) | Force `true`/`false`. |
 
@@ -75,4 +79,4 @@ sudo TUNNEL_TOKEN="..." PUBLIC_HOSTNAME="..." LOCAL_PORT="..." UPSTREAM="..." \
 - **403 / 401 from upstream**: the upstream API key is wrong/missing, or `API_KEY_ENV` points to an unset env var.
 - **Caddy not running**: `pgrep caddy` / log `~/.local/log/cf-tunnel-proxy/caddy.log`.
 - **Tunnel not connecting**: `pgrep cloudflared` / log `~/.local/log/cf-tunnel-proxy/cloudflared.log`.
-- **Stop**: `pkill cloudflared; pkill caddy`.
+- **Stop**: `pkill cloudflared; pkill caddy; pkill -f openai_compat_proxy.py`.
